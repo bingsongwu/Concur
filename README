@@ -1,0 +1,924 @@
+Concur - An extremely scalable threaded heap manager
+README 2.0
+
+Author:   Steve Scherf (steve@gracenote.com)
+Date:     Thu Feb 22 21:33:18 GMT 2007
+Modified: Tue Jul 10 21:13:47 GMT 2012
+
+
+This software is distributed under the terms of the Gracenote Open
+Source License (GOSL) Version 1.0. You should have received a copy
+of the GOSL along with this program; if not, you can obtain a copy
+from: http:/www.gracenote.com/corporate/opensource/LICENSE.html
+
+
+
+1. Introduction
+
+Concur is a drop-in replacement for malloc() and other standard memory
+allocation functions, intended for use in persistent multithreaded
+applications that perform concurrent memory allocations (hence the name
+'Concur'). It was created at Gracenote for use in our online lookup
+service after we discovered the very poor multithreaded performance of
+the stock threaded heap managers on Solaris, Linux and other popular
+Unix and Unix-like operating systems.
+在多线程并发分配的时候，大部分系统的线程存储堆管理器都表现出性能较差
+
+We found that our systems were bogging down because of lock contention in the
+heap, as well as suffering random periods of high CPU consumption while
+the heap manager performed periodic housekeeping. On one very modern
+version of Linux, it commonly took us 60 minutes to shut down our server
+software while we waited for the heap to coalesce!
+
+Since its creation in early 2006, it has performed flawlessly and faithfully
+to allow us to serve many billions of queries against our online services.
+It is extremely stable and high-performance, though the memory and startup
+overhead make it less suitable for small, ephemeral applications. On some
+platforms Concur's single-threaded performance even outstrips nonthreaded
+stock malloc implementations.
+
+It has served us well, and we believe it to currently be the most portable,
+best performing threaded memory manager there is. Rather than keep it to
+ourselves, we have decided to make it available for public use under the
+Gracenote Open Source License.
+
+
+1.1 License
+
+Before continuing, a word about the Gracenote Open Source License. This is
+a simple license (for lawyers, at least) that is intended to be non-burdensome
+to anyone wishing to use source code released by Gracenote. Please read the
+accompanying license information carefully. In a nutshell, it allows you to
+use Gracenote source code any way you like, without restriction, so long as
+you include the license document in any product that includes Gracenote
+source code.
+
+It is a nonviral license, in that you are not bound to license your own code
+under Gracenote's terms, unlike viral licenses like the GPL. We find that viral
+licenses can actually stifle usage of excellent software, and do not wish to
+perpetuate that problem. We want our source code to be put to good use by
+anyone and everyone, however they like. If you have any questions at all about
+the Gracenote license, please do not hesitate to ask us.
+
+Should you wish to license Concur under different terms, please contact
+us. We are open to alternate licensing, though please note that the Gracenote
+Open Source License is very permissive as it stands.
+
+
+
+2. Architecture
+
+Concur is very loosely based on the excellent Hoard multithreaded heap
+manager, written by Emery Berger (University of Massachusetts), et al.
+Only the fundamentals are similar, however; Concur departs from the Hoard
+model in several significant ways.
+
+We found Hoard to be very nonportable, as well as lacking in some areas with
+respect to performance. Our philosophy at Gracenote is also that, for numerous
+reasons, system software should be written in straight vanilla C, rather than
+C++ or other high level languages. It is for these reasons we decided to create
+Concur.
+Concur基于Hoard多线程堆管理器，又大不相同，由于几个原因（移植性最主要），Concur使用C实现
+
+Concur maintains multiple distinct heaps, with multiple size allocation classes
+in each heap. Pretty standard approach. Each processor should have its own
+heap, but since you can't effectively tie heaps to processors (portably, if at
+all), Concur takes several different approaches. First, there are multiple
+heaps per processor core, as this duplication will reduce the chance that two
+processors may try to access a heap simultaneously. But heaps are instead tied
+to threads, with the hope that thread processor affinity will achieve the same
+end. If affinity is implemented well by the operating system, processors should
+largely stay out of each others' way. But it's most important for threads, not
+CPUs, to stay out of each others' way.
+Concur维护几个不同的堆，而且每个堆有不同大小的分配类型。这是标准做法。
+每个处理器都应该有自己的内存堆，但是由于可移植性的问题，我们并不能很有效地把堆和处理器
+绑定，所以Concur采用了几个不同的方法。首先对于每个处理器都会有多个堆，这种冗余性会降低
+两个处理器同时访问一个堆的几率。除此之外堆和线程绑定，希望线程处理器亲和性会达到相同的
+效果。如果别的系统对于亲和性实现的很好，处理器应该彼此相互隔离，但是，相比CPU，更应该
+相互隔离的应该是线程。
+
+Even if CPU/thread affinity is implemented well, there is still the issue
+of threads being preempted in the midst of allocating memory, with heap lock
+acquired. When this happens, no other thread can allocate memory from that
+particular heap until the scheduler decides to restart the thread holding the
+lock. It's a nasty problem, and can absolutely kill concurrency under heavy
+usage. Multiple heaps/CPU will alleviate this problem to some extent, which is
+why Concur is designed to have at least 2 heaps/CPU. (But the essence of the
+problem is such that, even if you could portably and reliably tie heaps to
+processors, this problem would still occur.)
+即使CPU/线程亲和性实现的很好，在分配内存的中途也会因为堆分配锁的导致竞争问题。
+当发送竞争时别的线程都不能从那个堆分配内存直到调度器去重启锁定堆的线程。所以
+Concur对于每个CPU会设计最少两个堆
+
+Even that's not necessarily enough, however. When you have many more threads
+than CPUS, the problem still occurs. That's when you really wish you
+had more than 2 heaps/CPU. Too many heaps is not practical, and can cause
+waste for a variety of reasons. But locks are relatively cheap, so Concur
+was architected with locks per size class, rather than per heap. The benefit
+of this approach is that two threads can allocate memory from the same heap
+at the same time if they want memory of different sizes. In its default
+configuration, Concur has a very large number of size classes. So unless
+different threads tend to allocate like sizes of memory often, this approach
+will minimize lock contention considerably. (Concur does have heap locks,
+but only uses them when filling up an empty heap with new chunks of memory
+for later distribution, or when freeing up old consolidated chunks; relatively
+rare events.)
+但是当thread数远远大于CPU数时情况仍然会发生，这时你可能会希望每个CPU大于2个堆，
+这是不切实际的，也会导致浪费，锁相对来说比较适用，所以Concur在堆内部的分配类型
+使用了锁而不是对堆使用锁，这使得不同的线程能同时在同一个堆内分配不同大小类型的
+内存。默认情况下，Concur有很多内存大小类型。所以除非不同线程去分配大小近似的内
+存，否则的话这将会大大减少锁竞争。（Coucur也有堆锁，但在后续版本是只是用在使用
+新的内存快填充空堆的时候，或者释放合并的旧内存块，这情况相对少见）
+
+To avoid the sort of waste that might result from having a very large
+number of memory size classes, Concur allocates memory in two size quantas,
+small and large. Small memory allocations come from pools filled with "small"
+memory chunks, and large allocations come from pools with "large" chunks. This
+avoids waste in several ways, but it is possible that the memory space could
+get divided into small and large camps. Normally this is not an issue (I
+had to manually construct a worst-case test to exercise this case), but if it
+is a problem then Concur can be tuned to have only one chunk size.
+为了避免因为拥有多种类的内存大小内导致的浪费，Concur分配两种两种数量级的内存，
+小内存分配来自填充了小内存块的内存池，大内存分配反之。这在几个方面上避免了浪
+费
+
+If physical memory runs low, Concur will attempt to forestall involuntary
+system paging by raiding other heaps to satisfy a request. Failing that, it
+will attempt to raid memory from other (larger) size class pools, up to a
+limit. This feature has served us well, because we often push our systems to
+the edge of available RAM. It is far preferable to spend a little extra CPU
+time to check for available RAM in foreign heaps than to page out memory to
+get it. This behavior is tunable by the application at runtime.
+如果物理内存不足，那么Concur会尝试通过抢占别的堆来满足这个内存分配从而阻止
+非自发性的系统页请求，如果失败，那么Concur会从别的更大的内存大小类分配池抢占
+内存直到一个上限，这个特性运行的很好，因为我们经常压缩我们系统可用RAM的内存
+边缘。相比于系统分页，使用一点点额外的CPU时间来检查别的堆可用的RAM是更合适的。
+这些行为在程序运行的时候是可修改的
+
+
+As with Hoard, memory is acquired through anonoymous mmap() calls. For
+allocations that are very large (larger than the max chunk size), mmap() is
+called directly. Concur's threading model assumes POSIX pthreads, but should
+support Sun threads or any other threading model based on or interoperable with
+pthreads functionality. Internally, Concur makes use of pthread mutex locks
+and thread specific keys, so any application using a non-pthreads threading
+paradigm that can coexist with those pthread functions should still work. See
+below for more portability information.
+就和Hoard内存分配器一样，内存是通过mmap的匿名映射获得的。
+Concur线程模型使用POSIX线程，内部使用了线程mutex和线程特定KEY。所以很多
+使用非线程范例的应用程序能和这些pthread函数共存
+
+
+3. Performance
+
+Concur displays excellent scalability, with no significant contention 
+measured in our production environment. We have 4 and 8 core systems with
+32GB or more RAM, sometimes with dozens of threads (or more) running at once.
+Under these conditions, with Solaris mtmalloc we experienced up to 40% idle
+time on our CPUs as they waited on heap locks. Under GNU ptmalloc there was
+less idle time, but there were some very unpredictable lengthy pauses of many
+seconds at a time (not okay in a realtime service), apparently during internal
+housekeeping. Shutdown under ptmalloc was even more excruciating, taking up
+to an hour for our server software to call free() millions of times.
+Concur在我们的生产环境下显示出了极佳的扩展性，而且没明显的争用现象
+
+We never did test Hoard, because, as I noted earlier, it proved to be too
+nonportable. At the time it seemed not to support 64 bit processors, at
+least on Solaris, which was a requirement for us.
+
+Concur made all of these issues disappear. However, we have done very little
+head-to-head testing of Concur's performance aside from these scalability
+issues. Single-threaded testing of Concur against GNU malloc() shows Concur
+to be significantly faster in every way, except for very small allocations,
+where it's a little slower. This is pretty amazing, considering that
+multithreaded allocators are almost always slower than singlethreaded ones
+when running in singlethreaded mode. Against Solaris in singlethreaded
+operation it's neck-and-neck, with Solaris' allocator ever so slightly faster
+in most of the cases. Again, excellent, considering that multithreaded
+performance is Concur's goal.
+Concur在对比测试下性能很好
+
+One caveat is Concur's startup time. The first memory allocation causes
+Concur to initialize all of its data structures, pthread locks, condition
+variables and thread-specific keys. While this only consumes several
+milliseconds or so on our systems, it's slower than other allocators tend
+to be upon startup. This is one of the reasons we consider Concur more suitable
+for persistent processes rather than ephemeral ones; the startup time is
+irrelevant for a process that will live for minutes, hours, days or months,
+but might be a performance issue for processes persisting only for moments.
+It will work, of course, but you probably won't gain any performance, and you
+might even hurt performance.
+唯一需要注意的是Concur的启动时间，第一次内存分配会导致Concur去初始所有的数据结构，
+线程锁，条件变量和线程特定键。但是这仅仅消耗几毫秒在我们或者其他系统。这是对比其
+它分配器慢的阶段。这就是为什么Concur更加适合长时间运行的程序而不是瞬时程序。启动
+耗时对于需要 运行几分钟几小时甚至几天几个月的进程来说是无关紧要的。但是对于只运行
+一小会的程序来说是是个性能问题，Concur能正常工作，但是不会获得任何的性能提升甚至
+损害性能
+
+This holds true for memory consumption as well. Concur has a sizable base
+memory footprint, something like 2MB/heap when I last looked. In its default
+configuration, it consumes roughly 16MB of RAM just to start up. But on big
+iron like we use, this is insignificant, and the overhead is well worth the
+concurrency and memory efficiency gains.
+Coucur会比较消耗内存，在需要2MB的情况下会分配16MB，对比起来可能有点大，但是
+相对于获得并发和内存性能的提升，这是可以忽略的
+
+Despite the high memory overhead, overall memory consumption characteristics
+are quite good. Additional overhead as more memory is consumed is very low
+(practically insignificant), and because of the large number of size classes,
+very little waste occurs (roughly 10% on average). Our experience also shows
+little or no fragmentation. Concur's excellent memory consumption
+characteristics have gained us back 10-20% of our RAM for useful purposes,
+compared to the allocators we had been using.
+虽然内存开销比较大，但是整体的内存消耗性能是很好的，随着内存的分配这些开销更加
+变得微不足道。而且因为有大量的内存大小分配类，内存浪费率很低，Concur完美的内存
+消耗特性让我们获得了对比传统分配器百分之十到二十的内存利用率提高
+
+Don't be fooled by its apparent up-front memory hogging. Concur preloads size
+class pools in each heap as they are used, so the memory is not being wasted.
+It is simply proactively acquired and eventually used or migrated elsewhere.
+If this is somehow an issue for you, the easiest thing to do is to reduce the
+number of heaps with the cc_set_num_heaps() call, or to compile a smaller
+maximum default into the library. See the tuning and API sections below.
+别被Concur的前期内存占用所迷糊，因为它预分配了不同的内存分配池，所以内存并没有
+浪费。它只是简单的提前获取后期所需要使用或者迁移的内存而已，如果这对你来说是个
+问题，那么你可以通过cc_set_num_heads()调用改小或者编译一个默认值小一点的库。参考
+下面的调整API
+
+
+
+4. Tuning
+
+Adjusting the stock tuning of Concur probably isn't for the faint of heart.
+Many of the parameters must be chosen based on the values of other parameters,
+and if they don't jive then things will break. In its default configuration,
+Concur should work quite well for the majority of platforms. Only in the case
+of exceptionally large systems might you need to tweak values. I will touch
+only very briefly on what you need to change to increase the capacity of Concur
+to serve ultra-large iron, in a cookbook fashion.
+一般来说微调Concur参数是不合适的，因为参数直接有依赖，而且Concur在大部分主平台下
+都运行的很好，除了一些大型系统需要修改数值，对于这种情况下面简要说明一下
+
+Although Concur is primarily designed for big iron servers where RAM is cheap
+and CPUs are plentiful, and is configured appropriately for that environment,
+don't be discouraged if you want to use it on smaller systems. It works quite
+well if you tune it correctly. Probably all you have to do is configure the
+heap count appropriately, though Concur will run quite well on systems as low
+as 500MB or even less, under normal circumstances, without any changes.
+Concur最初是设计用于大型系统的，参数以此调整的。不过小型系统也是能使用了，不过
+需要相应调整
+
+Other tuning should not be necessary, but RTFC if you want to know more about
+it. Tuning is compiled into Concur, so you must make changes to constants in
+header files and recompile/reinstall Concur for changes to take effect. I
+describe how to change these values as needed below.
+如果你需要修改参数，那么你应该重新编译Concur并安装它
+
+4.1 How to tune for more than four CPU cores 修改多核
+
+Concur supports a maximum of 8 heaps by default. If you wish to maintain a
+ratio of 2 heaps/processor (recommended), you might wish to increase this
+limit if you have more than four CPU cores. However, increasing this value
+gratuitously has implications for additional overhead and memory waste.
+Concur默认最大支持8个堆，如果你在大于4核的机器上需要保持每个CPU/2堆的比例，那
+你应该增加编译的默认值，不过这也不可避免地增加了额外的内存消耗和浪费。
+
+We have tried a 1:1 heap/CPU ratio instead of 2:1 ratio and it still scales
+well. However, it does not provide a safety margin in case of too many threads
+attempting to get memory of the same size often. Your mileage may vary, so
+be sure you actually need more heaps, and don't allocate too many. Bear in
+mind that no matter how many CPUs you have, Concur will always function with
+as little as one heap, it just may not scale quite as well as having more heaps
+would, depending on your application's behavior. If you have a high CPU to RAM
+ratio, you may want to operate at less than 1:1.
+曾经测试过1/CPU情况，但是在很多线程同时分配同尺寸大小的情况性能不是很好，你的实际
+情况可能有所不同，所以请确认你真的需要更多的堆，不要分配太多。
+
+To increase the maximum number of heaps, change the value of CC_NUM_HEAPS from
+8 to the suggested value of 2x your CPU count. However, you can choose whatever
+value you want, as low as 1, and Concur will still function.
+为了修改最大的堆数，推荐修改CC_NUM_HEAPS为2xCPU个数，当然，任何数值都是可以的
+最低为1
+
+Note that this is only a maximum value, used to create static tables at compile
+time. You can lower the number of heaps used at runtime using
+cc_set_num_heaps(), and the only loss will be the relatively minor fixed
+overhead of each heap.
+上面的仅仅是编译时的最大值，你可以通过cc_set_num_heaps()在运行的时候降低数值
+
+
+4.2 How to tune for more than 640GB RAM  修改大于640G
+
+Concur allocates RAM for its arena from the system using mmap(). Most OSes
+have a limit of 65,536 or so mappings, which places an upper bound on how
+much total memory Concur can allocate. In its default configuration, Concur
+can allocate 800GB of "small" memory (i.e. allocations less than 128k in
+size), or 640GB of "large" memory (i.e. allocations between 128k and 512k in
+size).
+Concur使用mmap来分配内存，大部分系统的限制是65,536上限，这也是Concur能映射的
+最大内存数，在Concur的默认配置里面，Concur可以分配800G的small内存或者640G的
+large内存
+
+This is because Concur grabs memory from the OS in large blocks, by default
+12.5MB blocks for small RAM and 10MB for large RAM. So if you only ever
+allocate memory in sizes between 128k and 512k, then 65536 mappings of 10MB
+would allow for 640GB of RAM. Likewise 65536 12.5MB mappings allows for 800GB
+of allocations. (In case you were wondering, Concur allows for less large
+allocations because they are generally much less common than small
+allocations.)
+因为Concur从OS里面抓取大块内存进行分配，默认small内存块大小是12.5M，large是10M，
+
+
+To increase these limits, change the value of CC_LARGE_ARENA_CHUNKSZ and
+CC_SMALL_ARENA_CHUNKSIZE as needed. They must be a multiple of
+CC_LARGE_CHUNKSIZE and CC_SMALL_CHUNKSIZE, respectively, or you will waste a
+whole heap of memory (pun intended). These values are found in concur_plat.h.
+如果需要增加上限，那么需要修改CC_LARGE_ARENA_CHUNKSZ和CC_SMALL_ARENA_CHUNKSIZE
+的值，相对的你会增加内存浪费，这些值能在concur_plat.h找到
+
+Just upping these values gratuitously is not recommended. Setting them larger
+than needed may slow things down when calling mmap() to grow the arena. You
+also may observe heaps preloading much more aggressively, though if you have
+enough RAM that you want to increase these sizes, you probably won't mind.
+随意的增加这些数值是不推荐的，把他们设置的过大可能会降低mmap调用效率。而且你会
+发现内存更快的增长，如果你内存多，也许你不关心
+
+
+Increasing the amount of RAM supported for "oversized" allocations is more
+tricky. Memory allocations over 512K in size are handled by calling mmap()
+directly (and handed back to the OS when freed), rather than through the
+arena. If you allocate only chunks of 512K, then Concur can manage only
+32GB of RAM, but normally this is never a problem. It would be strange for
+an application to only allocate so much RAM in that one size. In practice, we
+see very few allocations > 512k at all. But if this is ever a problem for you,
+you will have to increase the size of CC_LARGE_CHUNKSZ, CC_LARGE_ALLOC_LIMIT
+CC_OVERSIZE_CHUNKSZ as appropriate. But that raises implications of other
+kinds, so I'll leave that one as an exercise for the reader (or you can email
+me if necessary).
+增加对过大内存的支持更加棘手，当内存分配大于512K的时候是直接调用mmap（）的（
+调用free的时候返回给系统），如果你值分配512K的块，那么Concur只能管理32G的内存。
+通常情况下这并不是问题。如果一个应用程序只分配一个大小的内存那就太奇怪了，事实上，
+很少情况下会分配大于512K的内存的，但是如果这对你是个问题，那你应该去适当的增加
+CC_LARGE_CHUNKSZ和CC_LARGE_ALLOC_LIMIT还有CC_OVERSIZE_CHUNKSZ。但是这有涉及到了
+别的类型，这里当作练习留给大家
+
+
+4.3 How to set Concur to use only one arena instead of two 设置为一个内存区
+
+Concur effectively has two arenas, one for small chunks and one for large
+chunks. Dual chunk sizes were deemed necessary because of the large number
+of heaps and size classes, to avoid the potential for huge wastage (or, rather,
+huge amounts if idle RAM). With so many size class pools, having hundreds or
+thousands of megabyte-sized chunks lying around with almost nothing of each
+actually being used is definitely a possibility. But a small chunk size is
+not feasible for larger allocations, so having two chunk sizes is the
+solution.
+Concur维护了两个内存区，一个small内存块和一个large内存块，由于有大量的对和不同
+大小的内存类，这被认为是必须的，这能避免潜在的过度浪费。随着这么多的内存类池，
+有成百上千的mb大小的块
+
+However, there is a drawback to having two separate arenas. Once part of the
+virtual space is allocated for one of the two arenas, that memory will always
+be assocated with that arena/chunk size. So if you have 10GB RAM and allocate
+8GB of small chunks, those chunks are pretty much stuck being used only for
+small allocations, and there will be only 2GB available for large chunks. Of
+course, if you free up all that memory (or big enough pieces of it, at least)
+it will be given back to the system, and it can then be reused for any size of
+data.
+
+If your application has unusual characteristics in this regard, Concur can
+be tuned so that it only has one chunk size/arena. It is conceivable for
+an application to have large numbers of constantly growing buffers, or some
+other situation that causes it to want mostly small buffers at first, followed
+by predominantly large buffers (or the reverse). Configuring Concur to use
+only one chunk size is simple. Just change CC_SMALL_CHUNKSZ so that it's the
+same size as CC_LARGE_CHUNKSZ and recompile; that's it.
+
+As I hinted earlier, there are possible implications to this, depending on
+the nature of your application. If you find excessive idle memory to be
+a problem (unlikely, but possible), you may wish to decrease the number of
+heaps or size classes. Doing so may decrease concurrency, but under normal
+conditions this shouldn't be an issue.
+
+
+4.4 How decrease the # of size classes
+
+If you find that Concur is grabbing more virtual memory than expected, you
+may have a problem with worst-case allocation patterns. I explain this for
+completeness, but have never actually observed it. Even constructing a test
+case is difficult. If your application allocates, say, one buffer from each
+size class in a heap, but no more, then virtual memory allocated from the OS
+will be much larger than the actual memory asked for by the application.
+
+This is because Concur funds various size classes in large quanta (chunks),
+regardless of how little is initially asked for. So the first time an
+application asks for 8 bytes of memory, Concur gets CC_SMALL_CHUNKSZ bytes of
+memory to satisfy that and future requests for 8 bytes. If the application
+never asks for an 8 byte buffer (or so) again, you now have
+(CC_SMALL_CHUNKSZ - 8) bytes of "idle" virtual memory. It's ready and waiting
+for future 8 byte allocation requests, but if there never is one, and the
+original 8 byte buffer is never freed, then the memory will never be used.
+
+Some amount of this inevitably happens in most applications, but it is generally
+a rare event. It is hard to conceive of an application that would allocate one
+or two buffers in each size class from each heap. As I mentioned, even doing
+this purposefully is hard. But with hundreds or thousands of size class pools,
+it would cause rapid virtual memory depletion if it did occur across the board.
+
+However, should an application with unusual characteristics experience more
+idle memory than expected, reducing the number of size classes may help. The
+number of size classes is a function of the "grain size" of a chunk, i.e. the
+quanta into which chunks will be split. Concur does not split into powers of
+two or some other common method. Instead it creates size classes that are
+essentially multiples of the grain size, up to the "alloc limit" for that
+chunk size. If you increase the grain size, the number of size classes
+decreases accordingly. The drawbacks are potentially increased lock contention
+and increased memory waste.
+
+Decreasing size classes may increase wasted memory because of the less
+fine-grained nature of the classes. If the grain size is 64 bytes, you will
+waste up to 63 bytes with each allocation (31.5 bytes on the average), while if
+the grain size is 8 bytes you will only waste up to 7 bytes per allocation
+(3.5 bytes on average).
+
+
+4.5 Metrics
+
+At your disposal are detailed metrics on each heap, including stats for
+each size class pool, freelists, etc. These detailed statistics can help you
+determine if Concur's tuning needs to be adjusted to better serve your
+application. While it is highly unlikely that you will need to change
+Concur from its default config, metrics are useful to aid in proper tuning
+should the need arise.
+
+I will not attempt to document the available metrics here. This isn't meant
+to discourage, though I do not actually encourage you either. There are
+quite simply too many to list and explain, and they are subject to change
+in future versions. You should not depend on any particular stat always being
+available. Rather, you should treat Concur's stats only as a temporary tool for
+digging into issues.
+
+Should you find the need to examine Concur's operation, you will need to read
+the code to understand exactly what is being returned by the cc_get_stats()
+call. RTFC!
+
+
+
+5. Supported platforms and portability
+
+This list is not intended to be exhaustive, especially since we have not
+tested portability widely since mid-2006. We have tried Concur with various
+versions of the following operating systems:
+
+FreeBSD
+Linux - (Red Hat/Suse/Ubuntu, 2.6 kernel)
+Mac OS X (10.4 and up)
+Solaris 8 and up
+
+We have tested on 32 and 64 bit processors, Intel, AMD and Sparc in various
+combinations with the aforementioned OSes. There appear to be no issues
+with running Concur on modern OS revisions. Since Concur depends entirely on
+proper OS implementation of the mmap() system call and the POSIX pthread
+library, noncompliant OSes may suffer. The only bug we have seen on any
+of the operating systems we tested is a bug (feature?) in Solaris 8/9 that
+limits anonymous mmap() allocations to a maximum of 2GB of virtual memory.
+(A patch may now exist for that particular OS bug.) All other issues we
+encountered went away when we installed the latest patches.
+
+OS-specific parts of the implementation can be found in concur_plat.c. While
+we have made no effort to port Concur to OSes that do not support required
+paradigms, we have tried to restrict OS-dependent things to that one file
+to improve portability. It should not be horribly difficult to implement
+arena management and locking functionality using paradigms other than mmap()
+and pthreads by reimplementing the relevant portions of concur_plat.c. So
+Concur can theoretically be ported with relative ease to non-Unix or primitive
+Unix-like platforms.
+
+We have made little effort to implement nonstandard or undocumented features
+of stock C library heap manager implementations. For example GNU libc has
+callback hooks that can be set by an application that will be executed at
+various points during memory allocations; these hooks have not been duplicated
+in Concur, nor are there plans to ever do so. Should your application depend
+on these or other nonstandard features, you might consider the implications of 
+such dependence on the portability of your application, even across different
+versions of the same OS.
+
+
+
+6. Installation
+
+The Concur package utilizes standard autotools for configuration and building.
+To compile, you simply unpack the files (which you've probably already done
+since you are reading this file), execute "./configure", and then
+"make install". If all goes well, the Concur libraries and headers should be
+installed and ready for use.
+
+If this method does not work on your system, it should be a simple matter
+to create a primitive makefile to compile concur.c and concur_plat.c into
+libconcur and concur_malloc.c into libccmalloc. In the unlikely event that
+you actually need to do this, it is left as an exercise to the reader.
+
+
+
+7. How to use Concur
+
+Using Concur is simple. As a drop-in malloc() replacement, you simply compile
+it into your application, and no code changes are necessary. Concur
+implements standard malloc API calls as a thin wrapper around private
+functions. I.e. malloc() in the Concur library just calls cc_malloc(). If you
+wish to use Concur as a malloc() replacement, compile with both "-lccmalloc"
+and "-lconcur".
+
+Note for OS X users: because of the way the OS X runtime linker works, you
+must be careful to do some additional setup so that the linker will resolve
+things correctly. If you are not careful, the linker will link all dynamic
+libraries against the C library malloc, while linking references in your
+application against Concur. This leads to having malloc, etc., resolve to two
+different functions simultaneously, depending on whether it is called from your
+application or from a library outside of your application. This strange and
+unfortunate behavior can be overridden by also explicitly including "-lc" on
+the compile line to force all malloc references in the C library to resolve
+against Concur. You may also need to do this for other libraries that use
+malloc and friends. Alternatively, you may wish to set up the dynamic linker
+to give priority to Concur when resolving (how to do this is left as an
+exercise for the reader).
+
+Applications using Concur will also need to link in the POSIX pthreads library.
+On most Unices this simply involves linking with "-lpthread", but the exact
+procedure may vary from system to system.
+
+
+7.1 Using Concur in conjunction with C library malloc()
+
+You may use Concur in addition to the stock C library malloc() if you want to
+make calls to Concur only under certain circumstances. If you compile only
+with "-lconcur", then your application will use the stock library functions
+and will not use Concur by default. Your application must directly call the
+Concur-specific functions, such as cc_malloc(), when you wish to utilize
+Concur to allocate memory.
+
+When functioning in this bifurcated mode, Concur will maintain heaps that
+are disjoint from the standard allocator's heap. They can peacefully coexist
+though your application will bear the cost of the overhead of maintaining
+two separate memory arenas. Most people will want to simply use Concur as
+a malloc() replacement, though we have found cases where it is useful to
+operate in this dual mode, such as when other libraries use nonstandard or
+undocumented features/symbols in the malloc() code. (I have attempted to
+emulate or stub these where possible, but there may be some I have not yet
+encountered.)
+
+When using Concur in bifurcated mode, take care to return memory allocated
+by Concur with cc_free() and not free(). The reverse is true; memory allocated
+with malloc() must be freed with free() and not cc_free(). Failure to observe
+this requirement will result in undefined behavior, quite possibly fatal to
+the application.
+
+
+7.2 API calls
+
+The following calls function essentially identically to their standard
+C library counterparts. You can call them directly (in bifurcated mode) or
+you can access them through their C library counterparts. The behavior is
+largely the same, though unlike many noncompilant malloc() implementations,
+zero-length allocations are not tolerated by cc_malloc() (though Concur's
+malloc() call does allow this, for compatibility).
+
+
+- void *cc_malloc(cc_size_t size)
+- void *cc_calloc(cc_size_t nmemb, cc_size_t size)
+- void *cc_realloc(void *ptr, cc_size_t size)
+- void *cc_memalign(cc_size_t alignment, cc_size_t size)
+- void *cc_valloc(cc_size_t size)
+- void cc_free(void *ptr)
+
+
+The following calls are Concur-specific and normally must be called directly,
+even when using Concur as a malloc() replacement. They are generally optional,
+regardless.
+
+
+- int cc_malloc_size(void *ptr, cc_size_t *realsize)
+
+Given a pointer "ptr" to memory allocated by Concur, cc_malloc_size() will
+place the usable size of that buffer in "realsize". When asked for N bytes
+of memory, Concur may actually provide more than N bytes of memory to the
+caller. This function reveals how much is actually given and safe to use.
+
+For example, should an application request 10 bytes of memory, Concur may
+actually allocate 16 bytes. When asked, cc_malloc_size() will place the value
+"16" in "realsize", indicating to the caller that the buffer can safely hold
+16 bytes without the need for reallocation and copying.
+
+This function returns 0 upon success, or EINVAL if it detects an invalid
+value of "ptr". Errno is also set to EINVAL upon failure.
+
+
+- int cc_malloc_good_size(cc_size_t size, cc_size_t *goodsize)
+
+Given a memory size "size", cc_malloc_good_size() will place the actual amount
+of memory allocated when acquiring a buffer of that size into "goodsize". For
+example, if size is "7", but concur actually gets 8 bytes for a 7 byte
+buffer, then this function will report "8".
+
+This function currently only returns 0. Good programmers will always check
+return values anyway.
+
+
+- int cc_set_heapsel_func(int (*func)(void))
+
+By default Concur uses an internal heap selection algorithm for assinging each
+thread a heap. The cc_set_heapsel_func() call allows the application to set
+its own function to be used instead of the built-in heap selection function.
+The "func" argument must be a pointer to the new heap selection function.
+
+How such a call might be implemented is beyond the scope of this document (RTFC
+if you are determined), however, the function simply returns a heap number
+greater than or equal to 0 and less than the number of configured heaps.
+
+Setting the heap selection function is not a threadsafe operation, so if you
+are going to use this function you must do so before threads are started in
+your application, or you must protect all calls to Concur with a mutex lock
+(yuk, then why even use Concur?!).
+
+This function currently only returns 0. Good programmers will always check
+return values anyway.
+
+
+- int cc_set_num_heaps(int num_heaps)
+
+This call informs Concur how many heaps the application feels it will need.
+The variable "num_heaps" should contain a value indicating the number of
+heaps desired. It is probably best to have two heaps per CPU/core if at all
+possible. Concur is configured with a maximum of 8 heaps by default, so if your
+application needs more than that, you will need to change CC_NUM_HEAPS as
+approprate and rebuild Concur.
+
+This function is not a threadsafe operation, so if you are going to use it
+you must do so before threads are started in your application, or you must
+protect all calls to Concur with a mutex lock (yuk!). Calling this function
+after running for some time will work, but some amount of idle memory may be
+"orphaned" (though not leaked or lost).
+
+Attempts to set num_heaps to a value that is too high, or less than one, will
+result in Concur silently choosing the closest reasonable value. This function
+currently only returns 0. Good programmers will always check return values
+anyway.
+
+
+- int cc_set_err_func(void (*func)(char *, ...))
+
+The cc_set_err_func() call allows the application to assign a printf-like
+function for Concur to call if errors occur. Normally, Concur will suppress
+any sort of error message output. If an application calls this function
+with a pointer to a printf-like function in the "func" argument, from that
+point onward Concur will call "func" with error message output when an error
+occurs. This may aid in application debugging. Be careful that your printf-like
+function doesn't try to allocate memory, or an endless loop could result.
+
+This function currently only returns 0. Good programmers will always check
+return values anyway.
+
+
+- int cc_set_max_mem(cc_size_t size)
+
+The cc_set_max_mem() function informs Concur about the maximum amount of
+physical memory available to the application. Concur will then always attempt
+to satisfy memory allocation requests from available memory pools before
+acquiring more than "size" bytes of virtual memory for its arena.
+
+Imagine, for example, that the application sets the max memory limit to 15GB.
+Concur will allocate memory normally, until such time as it must call mmap()
+for the 16106127361st byte of virtual memory. Rather than grow the arena
+past the 15GB limit, Concur will check all available heaps for any memory of
+an acceptable size that may be lying around. If it cannot find available memory
+to satisfy the request, Concur will then call mmap() as normal to grow the
+arena and satisfy the request. This approach can help delay or avoid costly and
+unnecessary paging for applications that consume large amounts of memory.
+Correct setting of this parameter can dramatically improve performance if you
+are running at or near the edge of available RAM.
+
+Calls to cc_set_max_mem() are threadsafe, and can be made at any time. If
+"size" is set to 0, memory size checking is disabled; this is the default
+behavior. This function currently only returns 0. Good programmers will
+always check return values anyway.
+
+
+- void cc_get_total_mem(cc_size_t *total_mem)
+- void cc_get_max_mem(cc_size_t *max_mem)
+- void cc_get_oversize_mem(cc_size_t *oversize_mem)
+
+These functions will place into the address indicated by "total_mem", "max_mem"
+or "oversize_mem" the current value of the named global variable. These
+variables are:
+
+ - total_mem: The total outstanding amount of memory allocated by the
+   application through calls to Concur.
+ - max_mem: The maximum amount of physical memory available to the application,
+   as set by the cc_set_max_mem() function (or defined by default).
+ - oversize_mem: The total outstanding amount of memory allocated in
+   oversize chunks. I.e. memory directly allocated using mmap() and not
+   actually on the stack itself.
+
+These functions are threadsafe, though the value returned may already be stale
+by the time the call returns to the application. To avoid this, the
+application must take steps to disallow allocations and frees during
+examination of the variable in question.
+
+
+- void cc_get_stats(cc_stat_t *cstat)
+
+When called, cc_get_stats() fills the buffer indicated by "cstat" with current
+heap statistics. The exact contents of this data structure are outside the
+scope of this document, though this data can be very useful for debugging
+or examining application behavior.
+
+Calls to cc_get_stats() are threadsafe. However, since many locks are
+simultaneously acquired to ensure data consistency, cc_get_stats() may
+momentarily affect performance when called.
+
+As with cc_get_total_mem(), stat data may already be stale by the time the
+call returns to the application. To avoid this, the application must take steps
+to disallow allocations and frees during examination of "cstat", unless you
+don't mind examining a heap snapshot that may no longer be accurate.
+
+
+- void cc_set_lock_mem(size_t size)
+
+The cc_set_lock_mem() function will cause up to "size" bytes of arena
+memory to be locked using the mlock() system call. The first "size"
+bytes of memory added to the arena will be locked, but further allocations
+will not. This value is only advisory, however. Should calls to mlock() fail
+when growing the arena, the allocation will return unlocked memory to the
+caller, without error (though the locking failure may be logged if an error
+callback function has been set).
+
+
+- void cc_maintain(int nice)
+
+The cc_maintain() function is used to search the entire heap space for chunks
+that have not been used for allocations in a while, and to move them to the
+global heap. While not strictly necessary, it may be useful to call this
+function periodically if you are afraid that thread burstiness or unusual
+allocation patterns may leave partially used chunks inactive for too long.
+
+Normally this is not necessary, as inactive memory eventually gets given back
+to the global pool after a while. If cc_set_max_mem() is used to set the
+allocation limit, inactive memory will be proactively put to general use when
+memory runs low. However, it can't hurt to call this function once in a while
+from a thread that can tolerate delays.
+
+This function looks at each chunk in each heap/size class/fullness group pool,
+and moves any chunk to the global heap that has not been touched in N call
+cycles (where N is the depth of the fullness group). This causes less-used
+chunks to be repurposed sooner than more-used chunks. But generally
+chunks that haven't been used in a while will be put back in the global
+pool for reuse on another heap. If the "nice" parameter is nonzero,
+cc_maintain() will give up control of the processor with each size class it
+examines. This avoids dominating the heap locks for too long, which might
+interfere with the performance of any allocations that take place concurrently
+with heap maintenance.
+
+You can better envision the effect of the heap maintenance with the following
+analogy. Imagine a thin stream of sand falling into the center of an
+ever-growing pile. As the pile of sand gets larger, more of the sand slides
+down to the sides; the pile gets flatter. Running this function is like
+scooping up sand from the edges of the pile and depositing it back on the top
+of the pile. The pile is still the same size, but is taller and less spread out.
+
+This function can be fairly expensive to run. In our environment at Gracenote,
+our servers call this function every ten minutes. It takes about 4 milliseconds
+to complete each time it is called. The function is called from a dedicated
+thread so we do not burden worker threads with the cost of maintenance (they
+need to execute their tasks in realtime, without delay). The "nice" parameter
+is used, to ensure the cc_maintain call does not interfere with timely access
+to the heaps by worker threads. Experience shows that this operation does
+help to keep total heap size down (lower unused heap memory), and does not
+interfere with the normal operation of the system in a measurable way.
+
+
+8. Changes
+
+8.1 Changes in Concur 1.0.1
+
+- Fixed a minor compliance issue in cc_realloc().
+
+The specification for realloc() states that if it is called with a size of 0,
+it frees the old buffer as if free() had been called explicitly. cc_realloc()
+used to simply return an error without freeing the buffer, but has now been
+changed to free the buffer. However, the spec also states that in this case the
+implementation is at liberty to either return a null pointer, or a pointer to
+a zero-length buffer. cc_realloc() will return a null pointer if called
+directly, but if realloc() is called directly the behavior is defined by the
+NO_ZERO_MALLOCS compile option (this option also affects the behavior of
+malloc() when zero bytes are requested).
+
+- Added the ability for Concur to lock all allocated memory.
+
+See cc_set_lock_mem() above.
+
+- Fixed a bug in cc_memalign().
+
+Didn't work at all. Odd, since it originally worked in test. Must have
+rotted. It's a rarely used function, so this wasn't a problem for the majority
+of applications.
+
+- Added stubs to intercept special GNU libc entry points.
+
+Support for unusual GNU libc entry points. Functions that allocate things
+are fully functional. Debug and telemetry functions are mostly just stubs to
+keep applications from inadvertently calling into libc malloc and potentially
+wreaking havoc.
+
+- Fixed some error logging issues.
+
+In several places the value of cc_err_func was not checked before calling.
+This could cause a null reference and probably an application crash, if no
+error function was set by the application. There is now a stub error function
+for use when the application does not define one.
+
+- Fixed malloc_good_size() so that it conforms to specification.
+
+The malloc_good_size() function used to behave exactly like malloc_size(). In
+fact, it is supposed to take only a size as an argument, not a pointer. Anyone
+attempting to use it correctly would have most likely experienced application
+failure.
+
+
+8.2 Changes in Concur 1.0.2
+
+- Added the cc_get_max_mem() and cc_get_oversize_mem() functions.
+
+See section "7.2 API Calls" above for details.
+
+- Fixed a never-seen locking bug.
+
+Two sanity checks failed to release one or more locks in the event of failure.
+These have been fixed for correctness, though it is "impossible" that the code
+would ever have actually executed. After quadrillions of memory operations
+in our live production servers, neither has ever fired. Thanks to
+spritelw@users.sourceforge.net for finding this bug.
+
+- Improved "clean-up" logic.
+
+We now give chunks back to the global heap more readily. If we bounce chunks
+around too much, however, they will start to stick around to avoid ping-ponging
+between heap and free list. This may decrease the amount of memory kept lying
+fallow instead of being actively used. This is generally only an issue in
+periods of decreased activity after periods of heavy activity, and really is
+not of concern in the majority of use cases.
+
+
+8.3 Changes in Concur 2.0
+
+- Added the cc_maintain() function.
+
+See section "7.2 API Calls" above for details.
+
+- Unused arenas are now returned to the system.
+
+In prior versions of Concur, the total amount of memory allocated from
+the system for use by the heap never decreases, even if the process frees
+it all. The reasoning behind this is that Concur is mainly intended for use
+in persistent processes that run for weeks or months, on systems dedicated to
+that process. At Gracenote, we tend to run a single service process at a time
+on a single system, so no other processes compete for significant amounts of
+memory with the service. Under this environment, giving back memory doesn't
+really buy anything, and may actually have a higher cost than just leaving
+any "idle" memory alone until it's needed again.
+
+However, there are valid arguments for returning unused memory to the system.
+If a process allocates large amounts of memory on a one-time basis, and
+will never need that memory again in the future (or at least will not need
+it for a very long time), it makes sense to return that memory to the system.
+
+Concur version 2.0 now returns arenas to the system (using munmap()) when
+all of the chunks of an arena end up on the global spare chunk pool. In
+practice, this may happen rarely, because all of the buffers comprised by the
+arena must be freed by the process. When it does happen, returning the arena
+to the system does not add significant cost to the freeing of a buffer.
+
+As a result of this change, you may now see the memory footprint of a process
+using Concur shrink at times. It will be most noticeable after freeing large
+amounts of memory, or after a call to cc_maintain() (which now piles spare
+chunks in the global pool when possible). Processes which run in a steady state
+of roughly balanced mallocs and frees will most likely see little or no effect
+of this change.
+
+
+
+9. Acknowlegements
+
+Thanks to Derek Godfrey for build support and autotools configuration.
+
+
+10. Feedback
+
+We welcome bug reports, comments (and compliments). To provide feedback on
+Concur, I can be reached at steve@gracenote.com. Unlike some authors, I
+generally don't like to receive feature requests, enhancements or bug fixes
+in the form of code (unless it's short). I much prefer verbal requests.
+
+I hope you find Concur useful!
+
+Steve Scherf
+steve@gracenote.com
