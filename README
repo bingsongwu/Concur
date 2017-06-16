@@ -4,7 +4,7 @@ README 2.0
 Author:   Steve Scherf (steve@gracenote.com)
 Date:     Thu Feb 22 21:33:18 GMT 2007
 Modified: Tue Jul 10 21:13:47 GMT 2012
-
+note:个人学习使用，水平有限，如有错误敬请谅解，欢迎纠正吐槽 #:)
 
 This software is distributed under the terms of the Gracenote Open
 Source License (GOSL) Version 1.0. You should have received a copy
@@ -373,9 +373,8 @@ thousands of megabyte-sized chunks lying around with almost nothing of each
 actually being used is definitely a possibility. But a small chunk size is
 not feasible for larger allocations, so having two chunk sizes is the
 solution.
-Concur维护了两个内存区，一个small内存块和一个large内存块，由于有大量的对和不同
-大小的内存类，这被认为是必须的，这能避免潜在的过度浪费。随着这么多的内存类池，
-有成百上千的mb大小的块
+Concur维护了两个内存区，一个small内存块和一个large内存块，内部有大量的对应不同
+大小的内存类，这被认为是必须的，这能避免过度浪费。
 
 However, there is a drawback to having two separate arenas. Once part of the
 virtual space is allocated for one of the two arenas, that memory will always
@@ -385,6 +384,9 @@ small allocations, and there will be only 2GB available for large chunks. Of
 course, if you free up all that memory (or big enough pieces of it, at least)
 it will be given back to the system, and it can then be reused for any size of
 data.
+因为有两个内存区，所以当你分配内存的时候那些虚拟地址就和其中一块内存区绑定了，
+当然你可以通过释放已有的内存重新分配从而进行重新绑定
+
 
 If your application has unusual characteristics in this regard, Concur can
 be tuned so that it only has one chunk size/arena. It is conceivable for
@@ -393,6 +395,8 @@ other situation that causes it to want mostly small buffers at first, followed
 by predominantly large buffers (or the reverse). Configuring Concur to use
 only one chunk size is simple. Just change CC_SMALL_CHUNKSZ so that it's the
 same size as CC_LARGE_CHUNKSZ and recompile; that's it.
+如果你的应用有特殊需求那么Concur是可以调成一个在一个内存区里面只有一个内存大小的
+块。如果这样做那么你只需要把CC_SMALL_CHUNKSZ和CC_LARGE_CHUNKSZ调整成一样的就好了
 
 As I hinted earlier, there are possible implications to this, depending on
 the nature of your application. If you find excessive idle memory to be
@@ -401,7 +405,7 @@ heaps or size classes. Doing so may decrease concurrency, but under normal
 conditions this shouldn't be an issue.
 
 
-4.4 How decrease the # of size classes
+4.4 How decrease the # of size classes 降低内存分配类的大小
 
 If you find that Concur is grabbing more virtual memory than expected, you
 may have a problem with worst-case allocation patterns. I explain this for
@@ -409,6 +413,9 @@ completeness, but have never actually observed it. Even constructing a test
 case is difficult. If your application allocates, say, one buffer from each
 size class in a heap, but no more, then virtual memory allocated from the OS
 will be much larger than the actual memory asked for by the application.
+如果你觉得Concur获取了高于预期的虚拟内存，那可能是使用着最糟糕的内存分配方式。
+如果你的应用都只用一个内存大小类分配内存，那么系统就会消耗比实际需求大得多的
+内存。
 
 This is because Concur funds various size classes in large quanta (chunks),
 regardless of how little is initially asked for. So the first time an
@@ -418,12 +425,17 @@ never asks for an 8 byte buffer (or so) again, you now have
 (CC_SMALL_CHUNKSZ - 8) bytes of "idle" virtual memory. It's ready and waiting
 for future 8 byte allocation requests, but if there never is one, and the
 original 8 byte buffer is never freed, then the memory will never be used.
+Concur在你第一次分配内存的时候就会分配诸如CC_SMALL_CHUNKSZ大小的内存缓冲区，然后
+从其中给你分配内存，剩下的空闲内存会一直被保持着直到你去再次请求分配内存，或者进程
+终止
 
 Some amount of this inevitably happens in most applications, but it is generally
 a rare event. It is hard to conceive of an application that would allocate one
 or two buffers in each size class from each heap. As I mentioned, even doing
 this purposefully is hard. But with hundreds or thousands of size class pools,
 it would cause rapid virtual memory depletion if it did occur across the board.
+很难想象有什么应用会从每个堆的每个内存分配类里面分配内存，如果发生了这种目的性很强
+的事情，那么虚拟内存会被快速消耗
 
 However, should an application with unusual characteristics experience more
 idle memory than expected, reducing the number of size classes may help. The
@@ -440,6 +452,8 @@ fine-grained nature of the classes. If the grain size is 64 bytes, you will
 waste up to 63 bytes with each allocation (31.5 bytes on the average), while if
 the grain size is 8 bytes you will only waste up to 7 bytes per allocation
 (3.5 bytes on average).
+降低内存类大小也会因为缺少细粒度特性而导致内存浪费。如果每次分配的大小是64B，那么
+每次你平均会浪费31.5B，如果是8B，那么平均浪费3.5B
 
 
 4.5 Metrics
@@ -450,6 +464,8 @@ determine if Concur's tuning needs to be adjusted to better serve your
 application. While it is highly unlikely that you will need to change
 Concur from its default config, metrics are useful to aid in proper tuning
 should the need arise.
+每个内存堆都有详细的性能指标，你可以根据这些数据来调整你的Concur默认配置
+disposal：处置，处理
 
 I will not attempt to document the available metrics here. This isn't meant
 to discourage, though I do not actually encourage you either. There are
@@ -458,10 +474,11 @@ in future versions. You should not depend on any particular stat always being
 available. Rather, you should treat Concur's stats only as a temporary tool for
 digging into issues.
 
+
 Should you find the need to examine Concur's operation, you will need to read
 the code to understand exactly what is being returned by the cc_get_stats()
 call. RTFC!
-
+如果需要去测试Concur的各种性能指标，你最后去看看cc_get_stats()的源代码
 
 
 5. Supported platforms and portability
@@ -517,7 +534,8 @@ If this method does not work on your system, it should be a simple matter
 to create a primitive makefile to compile concur.c and concur_plat.c into
 libconcur and concur_malloc.c into libccmalloc. In the unlikely event that
 you actually need to do this, it is left as an exercise to the reader.
-
+安装 ./configure
+make install
 
 
 7. How to use Concur
@@ -528,6 +546,8 @@ implements standard malloc API calls as a thin wrapper around private
 functions. I.e. malloc() in the Concur library just calls cc_malloc(). If you
 wish to use Concur as a malloc() replacement, compile with both "-lccmalloc"
 and "-lconcur".
+使用Concur不需要修改代码，因为它内部封装了malloc和free，只需要在编译的时候
+链接'-lccmaloc'和'-lconcur'即可。
 
 Note for OS X users: because of the way the OS X runtime linker works, you
 must be careful to do some additional setup so that the linker will resolve
@@ -546,7 +566,7 @@ exercise for the reader).
 Applications using Concur will also need to link in the POSIX pthreads library.
 On most Unices this simply involves linking with "-lpthread", but the exact
 procedure may vary from system to system.
-
+使用Concur的时候也需要链接POSIX线程库 '-lpthread'
 
 7.1 Using Concur in conjunction with C library malloc()
 
@@ -556,6 +576,8 @@ with "-lconcur", then your application will use the stock library functions
 and will not use Concur by default. Your application must directly call the
 Concur-specific functions, such as cc_malloc(), when you wish to utilize
 Concur to allocate memory.
+如果要和C的malloc同时使用，那么可以在编译的时候只用-lconcur选项，这样默认不使用
+concur的内存分配函数，你得显式调用cc_malloc()来使用Concur的的内存分配
 
 When functioning in this bifurcated mode, Concur will maintain heaps that
 are disjoint from the standard allocator's heap. They can peacefully coexist
@@ -572,7 +594,7 @@ by Concur with cc_free() and not free(). The reverse is true; memory allocated
 with malloc() must be freed with free() and not cc_free(). Failure to observe
 this requirement will result in undefined behavior, quite possibly fatal to
 the application.
-
+bifurcated：分叉的，二分叉的；
 
 7.2 API calls
 
@@ -625,6 +647,8 @@ return values anyway.
 
 
 - int cc_set_heapsel_func(int (*func)(void))
+这个函数能修改默认的线程堆选择算法，这个操作不是线程安全的，所以你最好在线程
+开始运行之前设置
 
 By default Concur uses an internal heap selection algorithm for assinging each
 thread a heap. The cc_set_heapsel_func() call allows the application to set
@@ -645,6 +669,8 @@ return values anyway.
 
 
 - int cc_set_num_heaps(int num_heaps)
+该函数能调整一个应用程序需要的内存堆数量，默认是2/CPU,最多8个堆，它一样也不是
+线程安全的函数。如果设置的值太高或者太低，Concur会自己选择最接近的合理值替代。
 
 This call informs Concur how many heaps the application feels it will need.
 The variable "num_heaps" should contain a value indicating the number of
@@ -713,16 +739,20 @@ variables are:
 
  - total_mem: The total outstanding amount of memory allocated by the
    application through calls to Concur.
+   Concur能分配的内存总量
  - max_mem: The maximum amount of physical memory available to the application,
    as set by the cc_set_max_mem() function (or defined by default).
+   最大的物理内存使用值
  - oversize_mem: The total outstanding amount of memory allocated in
    oversize chunks. I.e. memory directly allocated using mmap() and not
    actually on the stack itself.
+   设置内存分配上限，超过多大的内存分配以后，直接使用mmap（）分配内存
 
 These functions are threadsafe, though the value returned may already be stale
 by the time the call returns to the application. To avoid this, the
 application must take steps to disallow allocations and frees during
 examination of the variable in question.
+线程安全
 
 
 - void cc_get_stats(cc_stat_t *cstat)
@@ -760,12 +790,15 @@ that have not been used for allocations in a while, and to move them to the
 global heap. While not strictly necessary, it may be useful to call this
 function periodically if you are afraid that thread burstiness or unusual
 allocation patterns may leave partially used chunks inactive for too long.
+cc_maintain()用来定期将堆空间里面未使用的内存移动到全局堆里面
 
 Normally this is not necessary, as inactive memory eventually gets given back
 to the global pool after a while. If cc_set_max_mem() is used to set the
 allocation limit, inactive memory will be proactively put to general use when
 memory runs low. However, it can't hurt to call this function once in a while
 from a thread that can tolerate delays.
+一般来说是没必要调用这个函数的，因为空闲内存最终是返回到全局内存池的，不过如果
+cc_set_max_mem()设置了最高内存限额，那么内存不够时空闲内存会被主动释放。
 
 This function looks at each chunk in each heap/size class/fullness group pool,
 and moves any chunk to the global heap that has not been touched in N call
@@ -777,6 +810,7 @@ cc_maintain() will give up control of the processor with each size class it
 examines. This avoids dominating the heap locks for too long, which might
 interfere with the performance of any allocations that take place concurrently
 with heap maintenance.
+
 
 You can better envision the effect of the heap maintenance with the following
 analogy. Imagine a thin stream of sand falling into the center of an
@@ -794,7 +828,7 @@ is used, to ensure the cc_maintain call does not interfere with timely access
 to the heaps by worker threads. Experience shows that this operation does
 help to keep total heap size down (lower unused heap memory), and does not
 interfere with the normal operation of the system in a measurable way.
-
+这个函数比较耗性能
 
 8. Changes
 

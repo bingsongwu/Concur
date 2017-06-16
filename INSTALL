@@ -20,6 +20,7 @@ instructions specific to this package.  Some packages provide this
 below.  The lack of an optional feature in a given package is not
 necessarily a bug.  More recommendations for GNU packages can be found
 in *note Makefile Conventions: (standards)Makefile Conventions.
+安装：./configure; make; make install 还是那个味
 
    The `configure' shell script attempts to guess correct values for
 various system-dependent variables used during compilation.  It uses
@@ -35,6 +36,8 @@ and enabled with `--cache-file=config.cache' or simply `-C') that saves
 the results of its tests to speed up reconfiguring.  Caching is
 disabled by default to prevent problems with accidental use of stale
 cache files.
+可以使用--cache-file=config.cache来保持configure的中间检查文件以加速检查过程，
+默认不开启以防止意外
 
    If you need to do unusual things to compile the package, please try
 to figure out how `configure' could check whether to do them, and mail
@@ -47,6 +50,8 @@ may remove or edit it.
 `configure' by a program called `autoconf'.  You need `configure.ac' if
 you want to change it or regenerate `configure' using a newer version
 of `autoconf'.
+一般来说`configure.ac' (or `configure.in')是autoconf用来生产configure文件
+的，可以用新版本的autoconf来生成行的configure
 
    The simplest way to compile this package is:
 
@@ -60,7 +65,8 @@ of `autoconf'.
 
   3. Optionally, type `make check' to run any self-tests that come with
      the package, generally using the just-built uninstalled binaries.
-
+     make chekc是可选的，用来自检查
+	 
   4. Type `make install' to install the programs and any data files and
      documentation.  When installing into a prefix owned by root, it is
      recommended that the package be configured and built as a regular
@@ -87,7 +93,8 @@ of `autoconf'.
      files again.  In practice, not all packages have tested that
      uninstallation works correctly, even though it is required by the
      GNU Coding Standards.
-
+      make uninstall卸载
+	  
   8. Some packages, particularly those that use Automake, provide `make
      distcheck', which can by used by developers to test that all other
      targets like `make install' and `make uninstall' work correctly.
@@ -146,6 +153,8 @@ Installation Names
 can specify an installation prefix other than `/usr/local' by giving
 `configure' the option `--prefix=PREFIX', where PREFIX must be an
 absolute file name.
+默认安装在/usr/local/bin里面，头文件在/usr/local/include，你可以通过
+configure的时候使用--prefix=xxxx来修改
 
    You can specify separate installation prefixes for
 architecture-specific files and architecture-independent files.  If you
